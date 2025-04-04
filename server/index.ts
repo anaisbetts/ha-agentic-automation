@@ -15,11 +15,12 @@ import serveStatic from './serve-static-bun'
 
 import path from 'path'
 import { exists } from 'fs/promises'
-import { runAllEvals } from './run-evals'
+import { runAllEvals, runQuickEvals } from './run-evals'
 import { ScenarioResult } from '../shared/types'
 import { createLLMDriver } from './eval-framework'
 import { LiveHomeAssistantApi } from './lib/ha-ws-api'
 import packageJson from '../package.json'
+import { LiveServiceCore } from './workflow/service-core'
 
 configDotenv()
 
@@ -40,6 +41,7 @@ function repoRootDir() {
 
 async function serveCommand(options: {
   port: string
+  automations: string
   testMode: boolean
   evalMode: boolean
 }) {
@@ -47,6 +49,12 @@ async function serveCommand(options: {
 
   const conn = await LiveHomeAssistantApi.createViaEnv()
   const db = await createDatabase()
+  const service = new LiveServiceCore(
+    conn,
+    createDefaultLLMProvider(),
+    db,
+    path.resolve(options.automations)
+  )
 
   console.log(
     `Starting server on port ${port} (testMode: ${options.testMode || options.evalMode}, evalMode: ${options.evalMode}})`
@@ -54,7 +62,7 @@ async function serveCommand(options: {
   const subj: Subject<ServerMessage> = new Subject()
 
   handleWebsocketRpc<ServerWebsocketApi>(
-    new ServerWebsocketApiImpl(db, conn, options.testMode, options.evalMode),
+    new ServerWebsocketApiImpl(service, options.testMode, options.evalMode),
     subj
   )
 
@@ -129,17 +137,19 @@ async function evalCommand(options: {
   driver: string
   verbose: boolean
   num: string
+  quick: boolean
 }) {
   const { model, driver } = options
 
   const llm = createLLMDriver(model, driver)
 
-  console.log('Running all evals...')
+  console.log(`Running ${options.quick ? 'quick' : 'all'} evals...`)
   const results = []
   for (let i = 0; i < parseInt(options.num); i++) {
     console.log(`Run ${i + 1} of ${options.num}`)
 
-    for await (const result of runAllEvals(llm)) {
+    const evalFunction = options.quick ? runQuickEvals : runAllEvals
+    for await (const result of evalFunction(llm)) {
       results.push(result)
       if (options.verbose) {
         console.log(JSON.stringify(result, null, 2))
@@ -195,6 +205,7 @@ async function main() {
     .command('serve')
     .description('Start the HTTP server')
     .option('-p, --port <port>', 'port to run server on')
+    .option('-a, --automations <dir>', 'the directory to load automations from')
     .option(
       '-t, --test-mode',
       'enable read-only mode that simulates write operations',
@@ -228,6 +239,7 @@ async function main() {
     )
     .option('-n, --num <num>', 'Number of repetitions to run', '1')
     .option('-v, --verbose', 'Enable verbose output', false)
+    .option('-q, --quick', 'Run quick evals instead of full evaluations', false)
     .action(evalCommand)
 
   if (debugMode) {
